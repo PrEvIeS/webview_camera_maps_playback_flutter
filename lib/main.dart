@@ -1,9 +1,7 @@
-import 'dart:async';
-import 'dart:io';
-
-import 'package:camera/camera.dart';
+import 'package:audio_video_progress_bar/audio_video_progress_bar.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:video_player/video_player.dart';
 
 void main() {
   runApp(const MyApp());
@@ -35,122 +33,144 @@ class MyHomePage extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
-  int _currentPageIndex = 0;
-  late List<CameraDescription> cameras;
-  List<XFile> photos = [];
-  CameraController? _controller;
-  XFile? lastImage;
+  late VideoPlayerController _videoPlayerController;
 
   @override
   void initState() {
     super.initState();
-    unawaited(initCamera());
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    final CameraController? cameraController = _controller;
-
-    // App state changed before we got the chance to initialize.
-    if (cameraController == null || !cameraController.value.isInitialized) {
-      return;
-    }
-
-    if (state == AppLifecycleState.inactive) {
-      cameraController.dispose();
-    } else if (state == AppLifecycleState.resumed) {
-      _onNewCameraSelected(cameraController.description);
-    }
+    _videoPlayerController = VideoPlayerController.networkUrl(
+        Uri.parse(
+            'https://flutter.github.io/assets-for-api-docs/assets/videos/bee.mp4'),
+        videoPlayerOptions: VideoPlayerOptions())
+      ..initialize().then((_) {
+        // Ensure the first frame is shown after the video is initialized, even before the play button has been pressed.
+        setState(() {
+          _videoPlayerController.play();
+        });
+      });
+    _videoPlayerController.setLooping(true);
   }
 
   @override
   void dispose() {
-    _controller?.dispose();
+    _videoPlayerController.dispose();
     super.dispose();
-  }
-
-  void _onNewCameraSelected(CameraDescription description) async {
-    if (_controller != null) {
-      await _controller!.dispose();
-    }
-
-    final CameraController cameraController = CameraController(
-      description,
-      ResolutionPreset.high,
-      imageFormatGroup: ImageFormatGroup.jpeg,
-    );
-
-    _controller = cameraController;
-
-    cameraController.addListener(() {
-      if (mounted) {
-        setState(() {});
-      }
-    });
-  }
-
-  Future<void> initCamera() async {
-    cameras = await availableCameras();
-
-    _controller = CameraController(cameras[0], ResolutionPreset.max);
-
-    await _controller!.initialize();
-
-    setState(() {});
   }
 
   @override
   Widget build(BuildContext context) {
+    int maxBuffering = 0;
+    for (final DurationRange range in _videoPlayerController.value.buffered) {
+      final int end = range.end.inMilliseconds;
+      if (end > maxBuffering) {
+        maxBuffering = end;
+      }
+    }
+    StreamBuilder<Duration?> _progressBar() {
+      return StreamBuilder<Duration?>(
+        stream: _videoPlayerController.position.asStream(),
+        builder: (context, snapshot) {
+          final int duration =
+              _videoPlayerController.value.duration.inMilliseconds;
+          final int position =
+              _videoPlayerController.value.position.inMilliseconds;
+          final progress = position / duration;
+          final buffered = maxBuffering / duration;
+          final total = _videoPlayerController.value.duration;
+          return ProgressBar(
+            progress: Duration(milliseconds: progress.round()),
+            buffered: Duration(milliseconds: buffered.round()),
+            total: total,
+            onDragUpdate: (details) {
+              debugPrint('${details.timeStamp}, ${details.localPosition}');
+            },
+          );
+        },
+      );
+    }
+
     return Scaffold(
       appBar: AppBar(
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         title: Text(widget.title),
       ),
-      bottomNavigationBar: NavigationBar(
-        onDestinationSelected: (int index) {
-          setState(() {
-            _currentPageIndex = index;
-          });
-        },
-        selectedIndex: _currentPageIndex,
-        destinations: const <Widget>[
-          NavigationDestination(
-            icon: Icon(Icons.camera),
-            label: 'Camera',
+      body: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Stack(
+            children: [
+              _videoPlayerController.value.isInitialized
+                  ? AspectRatio(
+                      aspectRatio: _videoPlayerController.value.aspectRatio,
+                      child: Stack(
+                        alignment: Alignment.bottomCenter,
+                        children: <Widget>[
+                          VideoPlayer(_videoPlayerController),
+                          _progressBar(),
+                        ],
+                      ),
+                    )
+                  : Container(),
+            ],
           ),
-          NavigationDestination(
-            icon: Icon(Icons.photo),
-            label: 'Gallery',
-          ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              ElevatedButton(
+                style: ButtonStyle(
+                    backgroundColor:
+                        MaterialStateProperty.all<Color>(Colors.white),
+                    fixedSize: MaterialStateProperty.all(const Size(70, 70)),
+                    shape: MaterialStateProperty.all(RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(100)))),
+                onPressed: () {
+                  _videoPlayerController.seekTo(
+                    Duration(
+                        seconds:
+                            _videoPlayerController.value.position.inSeconds -
+                                10),
+                  );
+                },
+                child: const Icon(Icons.replay_10),
+              ),
+              ElevatedButton(
+                onPressed: () {
+                  _videoPlayerController.pause();
+                },
+                child: const Icon(Icons.pause),
+              ),
+              const Padding(padding: EdgeInsets.all(2)),
+              ElevatedButton(
+                onPressed: () {
+                  _videoPlayerController.play();
+                },
+                child: const Icon(Icons.play_arrow),
+              ),
+              ElevatedButton(
+                  style: ButtonStyle(
+                    backgroundColor:
+                        MaterialStateProperty.all<Color>(Colors.white),
+                    fixedSize: MaterialStateProperty.all(const Size(70, 70)),
+                    shape: MaterialStateProperty.all(
+                      RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(100),
+                      ),
+                    ),
+                  ),
+                  onPressed: () {
+                    _videoPlayerController.seekTo(
+                      Duration(
+                        seconds:
+                            _videoPlayerController.value.position.inSeconds +
+                                10,
+                      ),
+                    );
+                  },
+                  child: const Icon(Icons.forward_10))
+            ],
+          )
         ],
       ),
-      body: <Widget>[
-        _controller?.value.isInitialized == true
-            ? Center(
-                child: CameraPreview(_controller!),
-              )
-            : const SizedBox(),
-        ListView.builder(
-          itemCount: photos.length,
-          itemBuilder: (context, index) {
-            return Image.file(
-              File(photos[index].path),
-              fit: BoxFit.cover,
-            );
-          },
-        ),
-      ][_currentPageIndex],
-      floatingActionButton: FloatingActionButton(
-        onPressed: () async {
-          lastImage = await _controller?.takePicture();
-          setState(() {
-            photos.add(lastImage!);
-            print(photos);
-          });
-        },
-        tooltip: 'Photo',
-        child: const Icon(Icons.camera),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
     );
   }
 }
