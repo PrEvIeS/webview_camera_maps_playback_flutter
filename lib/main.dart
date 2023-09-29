@@ -1,7 +1,12 @@
-import 'package:audio_video_progress_bar/audio_video_progress_bar.dart';
+import 'dart:async';
+import 'dart:ui';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:video_player/video_player.dart';
+import 'package:webview_camera_maps_playback_flutter/utils/app_lat_long.dart';
+import 'package:webview_camera_maps_playback_flutter/utils/app_location.dart';
+import 'package:webview_camera_maps_playback_flutter/utils/control_button.dart';
+import 'package:yandex_mapkit/yandex_mapkit.dart';
 
 void main() {
   runApp(const MyApp());
@@ -33,141 +38,146 @@ class MyHomePage extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
-  late VideoPlayerController _videoPlayerController;
+  final mapControllerCompleter = Completer<YandexMapController>();
+  late YandexMapController controller;
 
+  final animation =
+      const MapAnimation(type: MapAnimationType.smooth, duration: 2.0);
+  MoscowLocation mosc = const MoscowLocation();
+  late Point _point;
+  final List<MapObject> mapObjects = [];
+  final MapObjectId mapObjectId = const MapObjectId('normal_icon_placemark');
+
+  Future<void> _initPermission() async {
+    if (!await LocationService().checkPermission()) {
+      await LocationService().requestPermission();
+    }
+    await _fetchCurrentLocation();
+  }
+
+  Future<void> _fetchCurrentLocation() async {
+    AppLatLong location;
+    const defLocation = MoscowLocation();
+    try {
+      location = await LocationService().getCurrentLocation();
+    } catch (_) {
+      location = defLocation;
+    }
+    _moveToCurrentLocation(location);
+  }
+  Future<Uint8List> _rawPlacemarkImage() async {
+    final recorder = PictureRecorder();
+    final canvas = Canvas(recorder);
+    const size = Size(50, 50);
+    final fillPaint = Paint()
+      ..color = Colors.blue[100]!
+      ..style = PaintingStyle.fill;
+    final strokePaint = Paint()
+      ..color = Colors.black
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1;
+    const radius = 20.0;
+
+    final circleOffset = Offset(size.height / 2, size.width / 2);
+
+    canvas.drawCircle(circleOffset, radius, fillPaint);
+    canvas.drawCircle(circleOffset, radius, strokePaint);
+
+    final image = await recorder.endRecording().toImage(size.width.toInt(), size.height.toInt());
+    final pngBytes = await image.toByteData(format: ImageByteFormat.png);
+
+    return pngBytes!.buffer.asUint8List();
+  }
   @override
   void initState() {
     super.initState();
-    _videoPlayerController = VideoPlayerController.networkUrl(
-        Uri.parse(
-            'https://flutter.github.io/assets-for-api-docs/assets/videos/bee.mp4'),
-        videoPlayerOptions: VideoPlayerOptions())
-      ..initialize().then((_) {
-        // Ensure the first frame is shown after the video is initialized, even before the play button has been pressed.
-        setState(() {
-          _videoPlayerController.play();
-        });
-      });
-    _videoPlayerController.setLooping(true);
+    _initPermission().ignore();
   }
 
-  @override
-  void dispose() {
-    _videoPlayerController.dispose();
-    super.dispose();
+  Future<void> _moveToCurrentLocation(
+    AppLatLong appLatLong,
+  ) async {
+    final mapObjectWithCompositeIcon = PlacemarkMapObject(
+      mapId: MapObjectId('composite_icon_placemark'),
+      point: Point(latitude: appLatLong.lat, longitude: appLatLong.long),
+      onTap: (PlacemarkMapObject self, Point point) =>
+          print('Tapped me at $point'),
+      isDraggable: true,
+      onDragStart: (_) => print('Drag start'),
+      onDrag: (_, Point point) => print('Drag at point $point'),
+      onDragEnd: (_) => print('Drag end'),
+      icon: PlacemarkIcon.single(PlacemarkIconStyle(image: BitmapDescriptor.fromBytes(await _rawPlacemarkImage()))),
+      opacity: 0.7,
+    );
+    setState(() {
+      _point = Point(latitude: appLatLong.lat, longitude: appLatLong.long);
+      mapObjects.add(mapObjectWithCompositeIcon);
+    });
+    (await mapControllerCompleter.future).moveCamera(
+      animation: const MapAnimation(type: MapAnimationType.linear, duration: 1),
+      CameraUpdate.newCameraPosition(
+        CameraPosition(
+          target: Point(
+            latitude: appLatLong.lat,
+            longitude: appLatLong.long,
+          ),
+          zoom: 12,
+        ),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    int maxBuffering = 0;
-    for (final DurationRange range in _videoPlayerController.value.buffered) {
-      final int end = range.end.inMilliseconds;
-      if (end > maxBuffering) {
-        maxBuffering = end;
-      }
-    }
-    StreamBuilder<Duration?> _progressBar() {
-      return StreamBuilder<Duration?>(
-        stream: _videoPlayerController.position.asStream(),
-        builder: (context, snapshot) {
-          final int duration =
-              _videoPlayerController.value.duration.inMilliseconds;
-          final int position =
-              _videoPlayerController.value.position.inMilliseconds;
-          final progress = position / duration;
-          final buffered = maxBuffering / duration;
-          final total = _videoPlayerController.value.duration;
-          return ProgressBar(
-            progress: Duration(milliseconds: progress.round()),
-            buffered: Duration(milliseconds: buffered.round()),
-            total: total,
-            onDragUpdate: (details) {
-              debugPrint('${details.timeStamp}, ${details.localPosition}');
-            },
-          );
-        },
-      );
-    }
-
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        title: Text(widget.title),
+        title: const Text('Текущее местоположение'),
       ),
       body: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Stack(
-            children: [
-              _videoPlayerController.value.isInitialized
-                  ? AspectRatio(
-                      aspectRatio: _videoPlayerController.value.aspectRatio,
-                      child: Stack(
-                        alignment: Alignment.bottomCenter,
-                        children: <Widget>[
-                          VideoPlayer(_videoPlayerController),
-                          _progressBar(),
-                        ],
-                      ),
-                    )
-                  : Container(),
-            ],
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Expanded(
+            child: YandexMap(
+              mapObjects: mapObjects,
+              onMapCreated: (yandexMapController) {
+                mapControllerCompleter.complete(yandexMapController);
+                controller = yandexMapController;
+              },
+            ),
           ),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              ElevatedButton(
-                style: ButtonStyle(
-                    backgroundColor:
-                        MaterialStateProperty.all<Color>(Colors.white),
-                    fixedSize: MaterialStateProperty.all(const Size(70, 70)),
-                    shape: MaterialStateProperty.all(RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(100)))),
-                onPressed: () {
-                  _videoPlayerController.seekTo(
-                    Duration(
-                        seconds:
-                            _videoPlayerController.value.position.inSeconds -
-                                10),
-                  );
-                },
-                child: const Icon(Icons.replay_10),
+          const SizedBox(height: 20),
+          Expanded(
+            child: SingleChildScrollView(
+              child: Table(
+                children: [
+                  TableRow(children: [
+                    ControlButton(
+                        onPressed: () async {
+                          await controller.moveCamera(CameraUpdate.zoomIn(),
+                              animation: animation);
+                        },
+                        title: 'Zoom in'),
+                    ControlButton(
+                        onPressed: () async {
+                          await controller.moveCamera(CameraUpdate.zoomOut(),
+                              animation: animation);
+                        },
+                        title: 'Zoom out'),
+                    ControlButton(
+                        onPressed: () async {
+                          await controller.moveCamera(
+                            CameraUpdate.newCameraPosition(
+                              CameraPosition(target: _point),
+                            ),
+                            animation: animation,
+                          );
+                        },
+                        title: 'Specific position'),
+                  ])
+                ],
               ),
-              ElevatedButton(
-                onPressed: () {
-                  _videoPlayerController.pause();
-                },
-                child: const Icon(Icons.pause),
-              ),
-              const Padding(padding: EdgeInsets.all(2)),
-              ElevatedButton(
-                onPressed: () {
-                  _videoPlayerController.play();
-                },
-                child: const Icon(Icons.play_arrow),
-              ),
-              ElevatedButton(
-                  style: ButtonStyle(
-                    backgroundColor:
-                        MaterialStateProperty.all<Color>(Colors.white),
-                    fixedSize: MaterialStateProperty.all(const Size(70, 70)),
-                    shape: MaterialStateProperty.all(
-                      RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(100),
-                      ),
-                    ),
-                  ),
-                  onPressed: () {
-                    _videoPlayerController.seekTo(
-                      Duration(
-                        seconds:
-                            _videoPlayerController.value.position.inSeconds +
-                                10,
-                      ),
-                    );
-                  },
-                  child: const Icon(Icons.forward_10))
-            ],
+            ),
           )
         ],
       ),
